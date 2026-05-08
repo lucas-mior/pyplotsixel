@@ -1,6 +1,7 @@
 # Copyright (c) 2024 Hajime Nakagami
 # Released under the BSD license.
 # https://github.com/nakagami/pyplotsixel/blob/master/pyplotsixel.py
+
 import sys
 import io
 import shutil
@@ -44,8 +45,37 @@ def _convert_line(data):
 
 
 def output_sixel(image, output):
-    image = image.quantize(256).convert("P", palette=Image.ADAPTIVE, colors=256)
     width, height = image.size
+
+    # --- 1-BIT ALPHA COMPOSITING ---
+    if image.mode == 'RGBA':
+        r, g, b, a = image.split()
+
+        # 1. Composite the smooth anti-aliased edges against a solid black background
+        bg = Image.new("RGB", image.size, (0, 0, 0))
+        bg.paste(image, mask=a)
+
+        # 2. Quantize the blended image to 255 colors (reserving 1 for transparency)
+        image_p = bg.quantize(255)
+
+        # 3. Identify truly transparent pixels and assign them to the reserved index (255)
+        alpha_data = np.array(a)
+        p_data = np.array(image_p)
+
+        transparent_idx = 255
+        p_data[alpha_data == 0] = transparent_idx
+
+        # 4. Reconstruct the paletted image
+        image = Image.fromarray(p_data, mode='P')
+        palette = image_p.getpalette()
+        if palette is None:
+            palette = []
+        # Pad the palette out to 256 colors
+        palette.extend([0, 0, 0] * (256 - len(palette) // 3))
+        image.putpalette(palette)
+    else:
+        image = image.quantize(256).convert("P", palette=Image.ADAPTIVE, colors=256)
+        transparent_idx = -1
 
     # header
     output.write(f'\x1bP7;1;75q"1;1;{width};{height}')
@@ -54,6 +84,9 @@ def output_sixel(image, output):
     palette = np.array(image.getpalette())
     palette = np.reshape(palette, (palette.size // 3, 3))
     for i in set(image.getdata()):
+        if i == transparent_idx:
+            continue  # Do not emit a color definition for the transparent background!
+
         p = palette[i]
         output.write(f'#{i};2;{p[0]*100//256};{p[1]*100//256};{p[2]*100//256}')
 
@@ -62,6 +95,9 @@ def output_sixel(image, output):
     data = np.reshape(data, (data.size // width, width))
     for y in range(0, height, 6):
         for n, node in _convert_line(data[y:y+6]):
+            if n == transparent_idx:
+                continue  # Sixel Magic: Simply skip drawing to let the terminal show through
+
             output.write(f"#{n}")
             for six, count in node:
                 if count < 4:
@@ -79,7 +115,14 @@ def output_sixel(image, output):
 class SixelFigureManager(FigureManagerBase):
     def show(self):
         buf = io.BytesIO()
-        self.canvas.figure.savefig(buf)
+        fig = self.canvas.figure
+
+        # Pass the exact configured facecolor from the figure instead of forcing transparent=True
+        fig.savefig(buf, format='png',
+                    facecolor=fig.get_facecolor(),
+                    edgecolor=fig.get_edgecolor())
+
+        buf.seek(0)
         with Image.open(buf) as image:
             output_sixel(image, sys.stdout)
 
