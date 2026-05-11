@@ -3,6 +3,8 @@
 # https://github.com/nakagami/pyplotsixel/blob/master/pyplotsixel.py
 import sys
 import io
+import shutil
+import matplotlib
 import numpy as np
 from PIL import Image
 from matplotlib.backend_bases import _Backend, FigureManagerBase
@@ -53,24 +55,25 @@ def output_sixel(image, output):
     palette = np.reshape(palette, (palette.size // 3, 3))
     for i in set(image.getdata()):
         p = palette[i]
-        output.write(f'#{i};2;{p[0]*100//256};{p[1]*100//256};{p[2]*100//256}\n')
+        output.write(f'#{i};2;{p[0]*100//256};{p[1]*100//256};{p[2]*100//256}')
 
     # body
     data = np.array(image.getdata())
     data = np.reshape(data, (data.size // width, width))
     for y in range(0, height, 6):
         for n, node in _convert_line(data[y:y+6]):
-            output.write(f"#{n}\n")
+            output.write(f"#{n}")
             for six, count in node:
                 if count < 4:
                     output.write(chr(0x3f + six) * count)
                 else:
                     output.write(f'!{count}{chr(0x3f+six)}')
-            output.write("$\n")
-        output.write("-\n")
+            output.write("$")
+        output.write("-")
 
     # terminate
-    output.write('\x1b\\')
+    output.write('\x1b\\\n')
+    output.flush()
 
 
 class SixelFigureManager(FigureManagerBase):
@@ -89,3 +92,38 @@ class SixelFigureCanvas(FigureCanvasAgg):
 class _BackendSixelAgg(_Backend):
     FigureCanvas = SixelFigureCanvas
     FigureManager = SixelFigureManager
+
+    @classmethod
+    def new_figure_manager(cls, num, *args, **kwargs):
+        provided_figsize = kwargs.get("figsize")
+        rc_figsize = matplotlib.rcParams["figure.figsize"]
+
+        if provided_figsize is not None and tuple(provided_figsize) != tuple(rc_figsize):
+            return super().new_figure_manager(num, *args, **kwargs)
+
+        dpi = kwargs.get("dpi")
+        if dpi is None:
+            dpi = matplotlib.rcParams["figure.dpi"]
+
+        try:
+            import fcntl
+            import termios
+            import struct
+            res = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
+            res_tuple = struct.unpack('HHHH', res)
+            xpixels = res_tuple[2]
+            ypixels = res_tuple[3]
+
+            if xpixels > 0 and ypixels > 0:
+                kwargs["figsize"] = (xpixels / dpi, (ypixels - 60) / dpi)
+                return super().new_figure_manager(num, *args, **kwargs)
+        except Exception:
+            pass
+
+        term_size = shutil.get_terminal_size(fallback=(80, 24))
+        cols = term_size.columns
+        lines = term_size.lines
+
+        kwargs["figsize"] = ((cols * 10) / dpi, ((lines - 3) * 20) / dpi)
+
+        return super().new_figure_manager(num, *args, **kwargs)
